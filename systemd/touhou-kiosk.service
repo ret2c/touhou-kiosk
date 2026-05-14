@@ -1,0 +1,35 @@
+[Unit]
+Description=Touhou TH12 kiosk (TH12 + score watcher + overlay)
+After=multi-user.target
+Conflicts=getty@tty1.service
+ConditionPathExists=/home/ubuntu/touhou-kiosk/launch_th12.sh
+# StartLimit* belong in [Unit], not [Service] — systemd silently ignores
+# them in [Service] and uses its (much shorter) default window.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+PAMName=login
+# Owning tty1 like a real login session. xinit insists on a controlling tty.
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+Environment=HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu
+WorkingDirectory=/home/ubuntu
+# Note: /etc/default/touhou-kiosk is sourced inside launch_th12.sh, not
+# loaded via systemd's EnvironmentFile=. EnvironmentFile= doesn't perform
+# shell-style ${VAR} substitution and HOOK uses that pattern.
+ExecStart=/home/ubuntu/touhou-kiosk/launch_th12.sh
+# Always restart — sometimes xinit exits 0 on a clean tear-down, and
+# `Restart=on-failure` wouldn't catch that.
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

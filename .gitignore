@@ -1,0 +1,29 @@
+# Editor / OS
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts that we'd regenerate, not the prebuilt PE32 we ship
+*.o
+*.obj
+
+# Local logs / state (operator scratch)
+/tmp/
+*.log
+
+# A user's own th12 install
+/games/
+th12.exe
+th12.dat
+scoreth12.dat
+th12.cfg
+
+# Local wine prefix
+.wine_touhou/

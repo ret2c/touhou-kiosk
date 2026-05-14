@@ -1,0 +1,28 @@
+[Unit]
+Description=Touhou TH12 — button daemon (keyboard input for the helper hit-trigger button)
+After=touhou-gate.service
+Wants=touhou-gate.service
+# Survives kiosk restarts. The button daemon needs to be alive across hit
+# windows, sleep cycles, and game-over auto-resets.
+
+[Service]
+Type=simple
+User=root
+Environment=DISPLAY=:0
+ExecStart=/home/ubuntu/touhou-kiosk/button_daemon.py \
+    --key F12 \
+    --state-file /tmp/touhou_state \
+    --gate-file /tmp/score_hit \
+    --kbd-event-file /tmp/touhou_kbd_event \
+    --gate-socket /tmp/touhou_gate.sock \
+    --gate-bridge /home/ubuntu/touhou-kiosk/gate_bridge.py \
+    --display :0 \
+    --long-press-seconds 3.0 \
+    --group-window-ms 400 \
+    --debug-hit-sim \
+    --log /tmp/button_daemon.log
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

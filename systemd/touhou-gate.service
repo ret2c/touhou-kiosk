@@ -1,0 +1,20 @@
+[Unit]
+Description=Touhou TH12 — gate daemon (software state-machine for the hook)
+After=local-fs.target
+# Independent of the kiosk service. Both rely on this socket; this comes
+# up first and stays up across kiosk restarts.
+
+[Service]
+Type=simple
+User=root
+ExecStart=/home/ubuntu/touhou-kiosk/fake_gate_mcu.py \
+    --socket /tmp/touhou_gate.sock \
+    --hb-timeout-ms 1500 \
+    --log /tmp/fake_gate_mcu.log
+Restart=on-failure
+RestartSec=2
+# Make socket world-writable inside the script (chmod 666). If you tighten
+# perms here you must adjust the chmod in fake_gate_mcu.py too.
+
+[Install]
+WantedBy=multi-user.target

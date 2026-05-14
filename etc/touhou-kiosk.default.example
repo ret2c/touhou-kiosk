@@ -1,0 +1,61 @@
+# Touhou TH12 configuration — copy to /etc/default/touhou-kiosk to apply.
+# The launcher sources this file (if present) at the top of execution.
+
+# Score threshold to trigger the hook. 10000 for debug, 200000 for prod.
+THRESHOLD=200000
+
+# How long the on-screen "HIT" flash stays up after a threshold cross,
+# in seconds. Also the value passed to the HOOK as its arm-window arg
+# (see the single-source-of-truth pattern below).
+GATE_WINDOW=5
+
+# ---------------------------------------------------------------------------
+# Hook command — runs as root from the score watcher when the threshold is
+# crossed. The watcher calls this hook once per cross, then independently
+# opens its own hit window (lock keyboard + flash "HIT" + poll
+# /tmp/score_hit) for --gate-window seconds before restarting the stage.
+#
+# In the default config, the hook arms the gate_bridge.py daemon which
+# enforces a default-deny / heartbeat-deadman safety state machine and
+# auto-disarms if the watcher dies. The HOOK_arm-window MUST equal
+# GATE_WINDOW or the gate stays permissive after the on-screen flash
+# ends — derive the hook from the env var so they're physically the
+# same value.
+# ---------------------------------------------------------------------------
+HOOK="/home/ubuntu/touhou-kiosk/gate_bridge.py --socket /tmp/touhou_gate.sock arm-window ${GATE_WINDOW} --background"
+
+# Stage-switch settings: after a threshold cross, switch into a random
+# stage from the pool instead of restarting the same stage.
+TH12_STAGESWITCH=1
+TH12_STAGESWITCH_STAGES=1,2,3,4,5,6
+COLD_BOOT_RANDOM_STAGE=1
+
+# Gate off the heuristic reset reasons (gameover/stuck/score_frozen).
+# Leave on for production — those heuristics false-fire on TH12's own
+# stage-load animations. The threshold path + title-screen detect cover
+# the actual cases the kiosk needs to handle.
+TOUHOU_THRESHOLD_ONLY=1
+
+# Rung 2 of the reset ladder (native restart via dll injection without
+# stage change). Empty = disabled — rely on stage_switch (rung 1), then
+# systemctl restart (rung 3). Set to 1 only if you have a reason to
+# bypass the stage randomizer.
+TH12_NATIVE_RESTART=
+export TH12_NATIVE_RESTART
+
+# Debug-only: skip the on-screen "HIT" flash entirely. Empty for normal
+# operation. The hook still fires regardless.
+TOUHOU_NO_FLASH=
+
+# Leave blank for normal operation. Set to 1 for bring-up/debug: low-level
+# overlays stay visible, keyboard lock is disabled, and the gate stays armed
+# for the full GATE_WINDOW even if /tmp/score_hit appears early.
+DEBUG_MODE=
+
+# Optional panel backlight value. Empty = leave the kernel/default brightness
+# alone. The project panel used 120.
+PANEL_BRIGHTNESS=120
+
+# Alternate hook examples for testing without a gate daemon:
+# HOOK='echo "GATE_EVENT $(date -Iseconds)" >> /tmp/gate_audit.log'
+# HOOK='/bin/true'
