@@ -1,6 +1,8 @@
 # Touhou Kiosk
 Running TH12: UFO (x86_32) on an Orange Pi 5 (aarch64) in a custom kiosk mode.
 
+<img width="720" height="540" alt="image" src="https://github.com/user-attachments/assets/33c1c959-b605-4361-b5e4-b66cbaa60538" />
+
 ## Overview
 - **Translation stack:** TH12 (32-bit x86 PE, 2009) runs under Hangover wine + Box64. Box64 JITs x86 → aarch64 (loaded as `wowbox64.dll` via wine's new-wow64 loader); wined3d translates D3D9 → OpenGL → Mesa → Panfrost on the Mali-G610
 - **Score watching:** a python daemon reads TH12's score / stage / frame / lives globals from `/proc/<pid>/mem` at fixed offsets
