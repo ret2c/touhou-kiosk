@@ -122,8 +122,7 @@ def main():
                         f"stage={snap.get('stage')} "
                         f"diff={snap.get('diff')} "
                         f"power={snap['power_display']} "
-                        f"frame={snap.get('frame')} "
-                        f"lframe={snap.get('lframe')}"
+                        f"frame={snap.get('frame')}"
                     )
                     last = snap
                 time.sleep(args.interval)

@@ -21,19 +21,11 @@ HANGOVER_WINE=/opt/touhou-hangover/usr/bin/wine
 KIOSK_DIR=/home/ubuntu/touhou-kiosk
 OVERLAY=${KIOSK_DIR}/score_overlay.py
 
-# Optional /etc/default/touhou-kiosk can override the threshold and hook
-# without editing this script. Useful for switching between debug (10k) and
-# production (200k), or for installing an external hit hook.
-THRESHOLD=10000
+# Defaults — overridable via /etc/default/touhou-kiosk.
+THRESHOLD=200000
 HOOK='echo "GATE_EVENT $(date -Iseconds)" >> /tmp/gate_audit.log'
-# Hit window — how long the HIT flash stays up between threshold cross
-# and stage restart. 30s for production (real hit window), 5s for
-# debug (don't want to wait 30s between every test cycle).
 GATE_WINDOW=5
-# DEBUG mode — when set to non-empty, the launcher spawns a small
-# flashing red "DEBUG" overlay in the top-left corner of the panel.
-# Reminds anyone looking at the kiosk that this is not production.
-DEBUG_MODE=1
+DEBUG_MODE=
 # Panel backlight brightness 0..max. Written to /sys/class/backlight/*/brightness
 # on every launch so the value survives kiosk restarts. Without this, the
 # panel's own brightness can drift across HDMI re-init cycles.
@@ -57,8 +49,7 @@ fi
 # Apply the panel brightness — even on restart, so it stays consistent.
 if [ -n "${PANEL_BRIGHTNESS:-}" ]; then
     for bl in /sys/class/backlight/*/brightness; do
-        [ -w "$bl" ] && echo "$PANEL_BRIGHTNESS" > "$bl" 2>/dev/null || \
-            echo "$PANEL_BRIGHTNESS" | sudo tee "$bl" >/dev/null 2>&1
+        echo "$PANEL_BRIGHTNESS" | sudo tee "$bl" >/dev/null 2>&1 || true
     done
 fi
 
@@ -125,16 +116,15 @@ for f in /tmp/gate_audit.log /tmp/overlay.log /tmp/watcher.log; do
     [ -e "$f" ] || sudo touch "$f"
     sudo chmod 666 "$f" 2>/dev/null || true
 done
-kill_python_helper() {
-    local script="$1"
-    sudo python3 - "$script" <<'PY'
-import os
-import signal
-import sys
-
+for helper in \
+        "$OVERLAY" \
+        "${KIOSK_DIR}/score_watcher.py" \
+        "${KIOSK_DIR}/debug_overlay.py" \
+        "${KIOSK_DIR}/debug_log_overlay.py"; do
+    sudo python3 - "$helper" <<'PY' 2>/dev/null || true
+import os, signal, sys
 target = os.path.realpath(sys.argv[1])
 me = os.getpid()
-
 for name in os.listdir("/proc"):
     if not name.isdigit():
         continue
@@ -158,11 +148,7 @@ for name in os.listdir("/proc"):
         except OSError:
             pass
 PY
-}
-kill_python_helper "$OVERLAY"
-kill_python_helper "${KIOSK_DIR}/score_watcher.py"
-kill_python_helper "${KIOSK_DIR}/debug_overlay.py"
-kill_python_helper "${KIOSK_DIR}/debug_log_overlay.py"
+done
 sleep 3
 sudo rm -f /tmp/.X*-lock
 sudo rm -rf /tmp/.X11-unix/X*
@@ -273,6 +259,20 @@ try:
         f.seek(0x004B0CBC); frame = struct.unpack('<I', f.read(4))[0]
         f.seek(0x004B0CA0); lives = struct.unpack('<I', f.read(4))[0]
         print('%d %d %d' % (stage, frame, lives))
+except Exception: sys.exit(1)
+" 2>/dev/null
+    }
+
+    # Read stage_struct_ptr — 0 on menu/game-over, non-zero only when the
+    # engine has actually allocated a stage struct. Distinguishes real
+    # gameplay from menu transients where stage/lives memory looks "playing".
+    read_sptr() {
+        local pid; pid=$(game_pid) || return 1
+        sudo python3 -c "
+import struct, sys
+try:
+    with open('/proc/${pid}/mem','rb',buffering=0) as f:
+        f.seek(0x004B44E8); print(struct.unpack('<I', f.read(4))[0])
 except Exception: sys.exit(1)
 " 2>/dev/null
     }
@@ -452,12 +452,31 @@ XBMEOF
             if [ -n "$SFL" ]; then
                 read s f l <<< "$SFL"
 
-                # ---- cold-boot random-stage early-fire ----
-                # As soon as stage 1 is alive (any frame >= 1, lives > 0),
-                # invoke stage-switch with random target 1..6.
+                # Cold-boot early-fire. Requires sptr != 0 AND frame to
+                # advance across a 150ms re-read — without both gates, the
+                # DLL inject lands during a menu transient where stage/lives
+                # memory looks playable but the engine isn't ticking, leaving
+                # frame pinned at 1 and the kiosk visibly stuck on title.
                 if [ -n "${COLD_BOOT_RANDOM_STAGE:-}" ] \
                         && [ "$s" = "1" ] && [ "$l" -gt 0 ] 2>/dev/null \
                         && [ "$f" -ge 1 ] 2>/dev/null; then
+                    SPTR_EARLY=$(read_sptr || echo 0)
+                    if [ "$SPTR_EARLY" = "0" ]; then
+                        sleep 0.1
+                        continue
+                    fi
+                    sleep 0.15
+                    SFL_RECHECK=$(read_stage_frame_lives || echo "")
+                    f_after=0
+                    if [ -n "$SFL_RECHECK" ]; then
+                        read _s_after f_after _l_after <<< "$SFL_RECHECK"
+                    fi
+                    if [ "$f_after" -le "$((f + 2))" ] 2>/dev/null; then
+                        echo "[!] early-fire stability check failed: f=${f}→${f_after} sptr=${SPTR_EARLY}" >&2
+                        sleep 0.1
+                        continue
+                    fi
+                    echo "[+] early-fire stability OK: f=${f}→${f_after} sptr=${SPTR_EARLY}" >&2
                     SS_INJECT_EARLY="/home/ubuntu/games/th12/th12_stageswitch_inject.exe"
                     if [ -x "$SS_INJECT_EARLY" ]; then
                         TARGET_EARLY=$(awk 'BEGIN{srand(); print int(1+rand()*6)}')

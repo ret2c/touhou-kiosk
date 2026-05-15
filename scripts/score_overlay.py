@@ -95,9 +95,8 @@ class Overlay:
     # healthy gameplay state (stage in 1..7 AND frame past the threshold).
     RESETTING_FLAG_FILE = "/tmp/touhou_resetting"
 
-    def __init__(self, game="th12"):
+    def __init__(self):
         self.cfg = TH12
-        self.game = "th12"
         self.pid = None
         self.delta = 0
         self.fd = None
@@ -429,11 +428,8 @@ class Overlay:
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    # Optional game argument; currently only "th12" is supported.
-    ap.add_argument("game", nargs="?", default="th12")
-    args = ap.parse_args()
-    Overlay(args.game).run()
+    argparse.ArgumentParser().parse_known_args()
+    Overlay().run()
 
 
 if __name__ == "__main__":

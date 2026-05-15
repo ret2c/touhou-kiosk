@@ -184,9 +184,15 @@ def handle_client(conn, gate):
             line = raw.decode("utf-8", errors="replace").rstrip()
             if not line:
                 continue
-            gate.log("RX %s" % line)
+            # HEARTBEAT fires every ~500ms during a gate window, dwarfing
+            # ARM/DISARM in the log. Skip the per-heartbeat RX/TX lines and
+            # rely on the ARM/AUTO_DISARM/DISARM events for the audit story.
+            verb = line.split(None, 1)[0].upper() if line else ""
+            if verb != "HEARTBEAT":
+                gate.log("RX %s" % line)
             resp = gate.cmd(line)
-            gate.log("TX %s" % resp)
+            if verb != "HEARTBEAT":
+                gate.log("TX %s" % resp)
             try:
                 f.write((resp + "\n").encode())
             except Exception:

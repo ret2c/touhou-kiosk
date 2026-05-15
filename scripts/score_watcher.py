@@ -18,7 +18,7 @@ Usage:
 """
 
 import argparse
-import atexit
+import fcntl
 import os
 import random
 import re
@@ -27,69 +27,7 @@ import struct
 import subprocess
 import sys
 import time
-import traceback
 
-
-# ---- Death diagnostics --------------------------------------------------
-# In a prior session the watcher disappeared between log entries with no
-# traceback in /tmp/watcher.log, no journal record, no OOM, no auth log
-# evidence. Cause was never identified. Adding signal handlers + an
-# atexit hook so any future death leaves a fingerprint in the log.
-
-_DEATH_LOG_PATH = "/tmp/watcher.log"
-
-
-def _death_print(msg):
-    """Write a single line directly to the watcher log + stderr, flushing
-    aggressively. Used from signal handlers and atexit; must not raise."""
-    try:
-        line = "[!! DEATH] %s\n" % msg
-        try:
-            sys.stderr.write(line)
-            sys.stderr.flush()
-        except Exception:
-            pass
-        try:
-            with open(_DEATH_LOG_PATH, "a") as f:
-                f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-def _install_death_diagnostics():
-    """Install signal handlers, atexit, and excepthook so the watcher
-    can't die quietly. Idempotent."""
-    def _sig_handler(signum, frame):
-        try:
-            name = signal.Signals(signum).name
-        except Exception:
-            name = "signal_%d" % signum
-        _death_print("received %s ppid=%d" % (name, os.getppid()))
-        # Re-raise the default handler so the process actually dies.
-        signal.signal(signum, signal.SIG_DFL)
-        os.kill(os.getpid(), signum)
-
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
-        try:
-            signal.signal(sig, _sig_handler)
-        except Exception:
-            pass
-
-    def _excepthook(exc_type, exc_value, tb):
-        text = "".join(traceback.format_exception(exc_type, exc_value, tb))
-        _death_print("uncaught_exception:\n%s" % text)
-        sys.__excepthook__(exc_type, exc_value, tb)
-
-    sys.excepthook = _excepthook
-
-    def _on_exit():
-        _death_print("exit ppid=%d" % os.getppid())
-
-    atexit.register(_on_exit)
 
 TH12 = {
     "exe": "th12.exe",
@@ -185,7 +123,6 @@ def restart_stage(display=":0"):
 
 def _read_frame(pid):
     """Read TH12's frame counter at fixed offset. Returns int or None."""
-    import struct
     try:
         with open(f"/proc/{pid}/mem", "rb", buffering=0) as f:
             f.seek(0x004B0CBC)
@@ -267,7 +204,6 @@ def uinput_inject_sequence(sequence):
       fine because TH12 is the only X client other than the score
       overlay.
     """
-    import fcntl
     fd = os.open(_UINPUT_PATH, os.O_WRONLY | os.O_NONBLOCK)
     created = False
     try:
@@ -602,7 +538,9 @@ def th12_stageswitch_via_wine(target_stage,
         print(f"[!] th12_stageswitch_via_wine: verify read failed: {e}",
               flush=True)
         return False
-    if sn == target_stage and 0 < fr < 600:
+    # 30-frame lower bound rejects the engine-stuck-at-frame=1 case;
+    # 600 upper bound rejects "frame is from the OLD stage, helper didn't fire".
+    if sn == target_stage and 30 < fr < 600:
         print(f"[+] th12_stageswitch_via_wine: success (stage={sn} frame={fr})",
               flush=True)
         return True
@@ -623,6 +561,38 @@ def unlock_keyboard(device_id, display=":0"):
         ["xinput", "enable", str(device_id)],
         env=_xenv(display), stderr=subprocess.DEVNULL,
     )
+
+
+def read_kiosk_state(state_file):
+    """Return one of {'playing', 'hit_window', 'sleep'}. Falls back to
+    'playing' on any read error. State file is rename-atomic on the writer
+    side (button_daemon), so a plain read is safe."""
+    try:
+        with open(state_file) as f:
+            v = f.read().strip()
+            if v in ("playing", "hit_window", "sleep"):
+                return v
+    except (FileNotFoundError, OSError):
+        pass
+    return "playing"
+
+
+def _parse_stageswitch_pool(spec):
+    pool = [int(s.strip()) for s in spec.split(",")
+            if s.strip().isdigit() and 1 <= int(s.strip()) <= 6]
+    return pool or [1, 2, 3, 4, 5, 6]
+
+
+def _pick_stageswitch_target(pool, mem):
+    # 2-stage pools alternate deterministically; larger pools use random.
+    if len(pool) == 2:
+        try:
+            cur_stage = mem.read("stage")
+        except OSError:
+            cur_stage = 0
+        candidates = [s for s in pool if s != cur_stage]
+        return candidates[0] if candidates else pool[0]
+    return random.choice(pool)
 
 
 def find_user_keyboard(display=":0"):
@@ -778,7 +748,7 @@ def _open_overlay_log():
         return os.fdopen(fd, "ab", buffering=0)
 
 
-def raise_overlay(display=":0", game="th12"):
+def raise_overlay(display=":0"):
     """Raise the tk overlay to the top of the X stack. If the overlay
     process is gone (got killed during a transition), respawn it first."""
     env = _xenv(display)
@@ -799,7 +769,7 @@ def raise_overlay(display=":0", game="th12"):
         with _open_overlay_log() as f:
             f.write(b"=== respawn ===\n")
         subprocess.Popen(
-            [OVERLAY_PATH, game],
+            [OVERLAY_PATH],
             env=env,
             stdout=_open_overlay_log(),
             stderr=subprocess.STDOUT,
@@ -840,7 +810,7 @@ class GameMem:
         # buffering=0 is REQUIRED — default 8KiB buffer caches /proc/<pid>/mem
         # so subsequent reads return stale values and the watcher never sees
         # the score climbing.
-        self.fd = open(f"/proc/{pid}/mem", "r+b", buffering=0)
+        self.fd = open(f"/proc/{pid}/mem", "rb", buffering=0)
 
     def read(self, key):
         self.fd.seek(self.cfg[key] + self.delta)
@@ -855,23 +825,12 @@ class GameMem:
                           f"(got {len(buf)} bytes, want 4); pid likely dead")
         return struct.unpack("<I", buf)[0]
 
-    def write(self, key, val):
-        self.fd.seek(self.cfg[key] + self.delta)
-        self.fd.write(struct.pack("<I", val))
-
     def score(self):
         return self.read("score") * self.cfg.get("score_mult", 1)
-
-    def reset_score(self):
-        self.write("score", 0)
-        for k in ("frame", "lframe"):
-            if k in self.cfg:
-                self.write(k, 0)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    # Optional game argument; currently only "th12" is supported.
     ap.add_argument("game", nargs="?", default="th12")
     ap.add_argument("--threshold", type=int, default=200000)
     ap.add_argument("--hook", default="echo GATE_EVENT")
@@ -923,7 +882,6 @@ def main():
                          "stage_switches.")
     args = ap.parse_args()
 
-    _install_death_diagnostics()
     print("[+] watcher pid=%d ppid=%d args=%r" % (
         os.getpid(), os.getppid(), sys.argv[1:]), flush=True)
 
@@ -947,8 +905,10 @@ def main():
 
     mem = GameMem(pid, cfg)
     user_kbd = None if args.no_lock else find_user_keyboard(args.display)
+    stageswitch_pool = _parse_stageswitch_pool(args.stageswitch_stages)
     print(f"[+] watching {cfg['exe']} pid={pid} threshold={args.threshold} "
-          f"user_kbd={user_kbd}", flush=True)
+          f"user_kbd={user_kbd} stageswitch_pool={stageswitch_pool}",
+          flush=True)
 
     last_score = 0
     last_frame = -1
@@ -980,29 +940,13 @@ def main():
     last_score_frozen_count = 0
     last_stuck_reset = 0.0
 
-
-
-    def read_kiosk_state():
-        """Returns 'playing', 'hit_window', 'sleep', or 'playing' on any
-        error. State file is rename-atomic on the writer side, so a
-        plain read is safe."""
-        try:
-            with open(args.state_file) as f:
-                v = f.read().strip()
-                if v in ("playing", "hit_window", "sleep"):
-                    return v
-        except (FileNotFoundError, OSError):
-            pass
-        return "playing"
-    pause_attempts = 0  # consecutive Esc dismissals; after 3 → escalate
-
     def do_reset(reason):
         """All reset paths converge on systemctl restart of the kiosk
         service — only that's reliable through Wine's keyboard grab.
 
         reason == "threshold" → user reached score gate. Fire hit hook,
             flash "HIT", pause the game (Esc), lock keyboard, wait up to
-            args.hit_window seconds for either a hit-file to appear OR
+            args.gate_window seconds for either a hit-file to appear OR
             the timeout to elapse, then restart.
         reason == "gameover"  → player ran out of lives: silent restart,
             no hook, no flash, no wait.
@@ -1032,7 +976,7 @@ def main():
             # XRaise's them — needed because bare X has no compositor
             # and tk's "-topmost" attribute is just a hint that nothing
             # is enforcing.
-            raise_overlay(display=args.display, game=args.game)
+            raise_overlay(display=args.display)
             # Brief settle: give score_overlay a tick to react to the
             # resetting flag (it polls at 100ms) and expand its mask
             # to the full 640x480 wine vdesk before we tear down wine.
@@ -1091,15 +1035,15 @@ def main():
                 flash_proc = None
                 if not args.no_flash:
                     flash_proc = show_hit_flash(
-                        args.display, duration=args.hit_window,
+                        args.display, duration=args.gate_window,
                         gate_file=args.gate_file,
                     )
-                # Wait up to hit_window seconds for the hit-file to
+                # Wait up to gate_window seconds for the hit-file to
                 # appear (touched by a hardware hit-detect daemon when
                 # wired up). Polls every 0.2s.
-                print(f"[+] hit window {args.hit_window:.0f}s "
+                print(f"[+] gate window {args.gate_window:.0f}s "
                       f"(hit file: {args.gate_file})", flush=True)
-                deadline = time.monotonic() + args.hit_window
+                deadline = time.monotonic() + args.gate_window
                 hit = False
                 while time.monotonic() < deadline:
                     if os.path.exists(args.gate_file):
@@ -1143,78 +1087,30 @@ def main():
             #     which uses TH12's NATIVE Continue option (default-
             #     highlighted on game-over). Game restarts current
             #     stage. No kiosk restart, no menus after a frame.
+            # Reset ladder: stageswitch → native_restart → native_continue
+            # (non-threshold reasons only) → systemctl restart.
+            stages_enabled = (args.stageswitch
+                              or os.environ.get("TH12_STAGESWITCH"))
+            native_enabled = (args.native_restart
+                              or os.environ.get("TH12_NATIVE_RESTART"))
             restored = False
-            if reason == "threshold":
-                # Threshold path reset ladder:
-                #   1. stage-switch to a random stage (primary path) — IF
-                #      --stageswitch is enabled. This is the primary
-                #      kiosk reset because it both restarts the stage
-                #      AND randomizes which stage comes next.
-                #   2. native_restart — same-stage restart via DLL injection.
-                #   3. systemctl restart — bombproof fallback.
-                # Each rung is independent; if a higher rung fails we
-                # fall through to the next.
-                stages_enabled = args.stageswitch or os.environ.get(
-                    "TH12_STAGESWITCH")
+            if reason in ("threshold", "gameover", "stuck", "title_screen"):
                 if stages_enabled:
-                    pool = [int(s.strip()) for s
-                            in args.stageswitch_stages.split(",")
-                            if s.strip().isdigit() and 1 <= int(s.strip()) <= 6]
-                    if not pool:
-                        pool = [1, 2, 3, 4, 5, 6]
-                    # 2-stage pool → alternate deterministically (pick the
-                    # stage that isn't the current one).
-                    if len(pool) == 2:
-                        try:
-                            cur_stage = mem.read("stage")
-                        except OSError:
-                            cur_stage = 0
-                        candidates = [s for s in pool if s != cur_stage]
-                        target = candidates[0] if candidates else pool[0]
-                    else:
-                        target = random.choice(pool)
+                    target = _pick_stageswitch_target(stageswitch_pool, mem)
                     print(f"[+] stageswitch chosen target={target} "
-                          f"(pool={pool})", flush=True)
+                          f"(reason={reason} pool={stageswitch_pool})",
+                          flush=True)
                     restored = th12_stageswitch_via_wine(
                         target, display=args.display)
                     if not restored:
                         print("[!] stageswitch failed; falling back to "
                               "native_restart", flush=True)
-                if not restored and (
-                        args.native_restart or os.environ.get(
-                            "TH12_NATIVE_RESTART")):
+                if not restored and native_enabled:
                     restored = th12_restart_via_wine(display=args.display)
                     if not restored:
                         print("[!] native restart failed; falling back to "
-                              "systemctl restart", flush=True)
-            elif reason in ("gameover", "stuck", "title_screen"):
-                # Same reset ladder as threshold but no hook fire.
-                stages_enabled = args.stageswitch or os.environ.get(
-                    "TH12_STAGESWITCH")
-                if stages_enabled:
-                    pool = [int(s.strip()) for s
-                            in args.stageswitch_stages.split(",")
-                            if s.strip().isdigit() and 1 <= int(s.strip()) <= 6]
-                    if not pool:
-                        pool = [1, 2, 3, 4, 5, 6]
-                    if len(pool) == 2:
-                        try:
-                            cur_stage = mem.read("stage")
-                        except OSError:
-                            cur_stage = 0
-                        candidates = [s for s in pool if s != cur_stage]
-                        target = candidates[0] if candidates else pool[0]
-                    else:
-                        target = random.choice(pool)
-                    print(f"[+] stageswitch chosen target={target} "
-                          f"(reason={reason} pool={pool})", flush=True)
-                    restored = th12_stageswitch_via_wine(
-                        target, display=args.display)
-                if not restored and (
-                        args.native_restart or os.environ.get(
-                            "TH12_NATIVE_RESTART")):
-                    restored = th12_restart_via_wine(display=args.display)
-                if not restored:
+                              "next rung", flush=True)
+                if not restored and reason != "threshold":
                     # native_continue (Z) handles menu dismissal via
                     # TH12's own Continue mechanism. Empirically works
                     # on game-over screen (frame goes ~3000 → ~110, real
@@ -1225,7 +1121,7 @@ def main():
                         display=args.display, pid=pid,
                         diag=args.native_continue_diag)
             elif reason == "score_frozen":
-                if args.native_restart or os.environ.get("TH12_NATIVE_RESTART"):
+                if native_enabled:
                     restored = th12_restart_via_wine(display=args.display)
             if not restored:
                 restart_stage(display=args.display)
@@ -1282,7 +1178,6 @@ def main():
         if f != last_frame:
             last_frame = f
             last_frame_change = now
-            pause_attempts = 0
         if s != last_score:
             print(f"score={s} stage={stage} lives={lives} frame={f}",
                   flush=True)
@@ -1295,7 +1190,7 @@ def main():
         # respawns if no tk window is found. Throttle to every 30s so
         # we're not banging xdotool every tick.
         if now - last_overlay_check > 30.0:
-            raise_overlay(display=args.display, game=args.game)
+            raise_overlay(display=args.display)
             last_overlay_check = now
 
         if in_reset or now < cooldown_until:
@@ -1333,9 +1228,9 @@ def main():
         # Threshold crossed → fire hit + restart
         if s >= args.threshold:
             do_reset("threshold")
+            now_after = time.monotonic()
             last_score = 0
-            last_score_change = time.monotonic()
-            last_frame_change = time.monotonic()
+            last_score_change = last_frame_change = now_after
             time.sleep(args.interval)
             continue
 
@@ -1351,10 +1246,10 @@ def main():
                 and lives is not None and lives == 0 and stage > 0
                 and now - last_frame_change > 2.0):
             do_reset("gameover")
+            now_after = time.monotonic()
             last_score = 0
             last_frame = -1
-            last_score_change = time.monotonic()
-            last_frame_change = time.monotonic()
+            last_score_change = last_frame_change = now_after
             time.sleep(args.interval)
             continue
 
@@ -1362,11 +1257,10 @@ def main():
         # by button_daemon and the frame counter freezes by design — do
         # NOT stuck-detect it. Same reasoning for score: score-frozen
         # detection must also yield during sleep.
-        kiosk_state = read_kiosk_state()
+        kiosk_state = read_kiosk_state(args.state_file)
         if kiosk_state == "sleep":
             last_frame_change = now
             last_score_change = now
-            pause_attempts = 0
             time.sleep(args.interval)
             continue
 
@@ -1395,12 +1289,12 @@ def main():
             print(f"[!] score=0 stuck >30s; treating as menu/pause",
                   flush=True)
             do_reset("score_frozen")
+            now_after = time.monotonic()
             last_score = 0
             last_frame = -1
             # Reset clocks AFTER the reset completes so we don't
             # immediately re-fire on the next loop iteration.
-            last_score_change = time.monotonic()
-            last_score_frozen_reset = time.monotonic()
+            last_score_change = last_score_frozen_reset = now_after
             time.sleep(args.interval)
             continue
 
@@ -1435,6 +1329,7 @@ def main():
                   f"(stage {stage}, lives {lives}) — likely game-over/menu",
                   flush=True)
             do_reset("score_frozen")
+            now_after = time.monotonic()
             # Count repeat triggers within the 180s escalation window;
             # reset the count if it's been longer than the window.
             if t_since_prev < 180.0:
@@ -1443,8 +1338,7 @@ def main():
                 last_score_frozen_count = 1
             last_score = 0
             last_frame = -1
-            last_score_change = time.monotonic()
-            last_score_frozen_reset = time.monotonic()
+            last_score_change = last_score_frozen_reset = now_after
             time.sleep(args.interval)
             continue
 
@@ -1461,58 +1355,28 @@ def main():
                 and lives is not None and lives > 0 and stage > 0
                 and now - last_frame_change > 10.0):
             # Stuck recovery: native_continue (Z press) handles the
-            # common case (game-over screen) without opening TH12's
-            # pause menu via Esc — pressing Z just confirms TH12's
+            # common case (game-over screen) by confirming TH12's
             # default-highlighted "Continue".
-            if True:
-                # Escalation: if a previous stuck reset finished within
-                # the last 30s and frame is stuck again, the recovery
-                # isn't working (typically: game on title screen, Z
-                # confirms wrong menu option, never reaches gameplay).
-                # Skip retrying and go straight to systemctl restart.
-                t_since_prev = time.monotonic() - last_stuck_reset
-                if last_stuck_reset > 0 and t_since_prev < 30.0:
-                    print(f"[!] stuck again {t_since_prev:.0f}s after prev "
-                          f"recovery; escalating to systemctl restart",
-                          flush=True)
-                    restart_stage(display=args.display)
-                    # systemctl restart kills this process
-                print("[!] frame stuck >10s; native_continue (Z to game window)",
+            #
+            # Escalation: if a previous stuck reset finished within the
+            # last 30s and frame is stuck again, the recovery isn't
+            # working (typically: game on title screen, Z confirms
+            # wrong menu option, never reaches gameplay). Skip retrying
+            # and go straight to systemctl restart.
+            t_since_prev = now - last_stuck_reset
+            if last_stuck_reset > 0 and t_since_prev < 30.0:
+                print(f"[!] stuck again {t_since_prev:.0f}s after prev "
+                      f"recovery; escalating to systemctl restart",
                       flush=True)
-                do_reset("stuck")
-                last_stuck_reset = time.monotonic()
-                pause_attempts = 0
-                last_score = 0
-                last_frame = -1
-                last_score_change = time.monotonic()
-                time.sleep(args.interval)
-                continue
-            if pause_attempts >= 3:
-                print(f"[!] {pause_attempts} pause attempts failed — silent restart",
-                      flush=True)
-                do_reset("stuck")
-                pause_attempts = 0
-                last_score = 0
-                last_frame = -1
-                last_score_change = time.monotonic()
-                time.sleep(args.interval)
-                continue
-            pause_attempts += 1
-            print(f"[!] suspected pause (frame stuck @{f}, lives={lives}) "
-                  f"attempt {pause_attempts}/3 — Esc", flush=True)
-            _prime_focus(args.display)
-            time.sleep(0.2)
-            subprocess.run(["xdotool", "key", "Escape"],
-                           env=_xenv(args.display))
-            # Push the "last frame change" timestamp 3 s into the
-            # FUTURE so the stuck-detect won't re-fire for at
-            # least 3 s — gives the Esc keypress time to land and
-            # the engine time to unpause without our retry loop
-            # racing it. Misnamed variable but the offset matters:
-            # the comparison is `now - last_frame_change > 10.0`,
-            # and we're effectively setting "give it 13 s before
-            # re-firing" by stashing now+3 here.
-            last_frame_change = now + 3.0
+                restart_stage(display=args.display)
+                # systemctl restart kills this process
+            print("[!] frame stuck >10s; native_continue (Z to game window)",
+                  flush=True)
+            do_reset("stuck")
+            now_after = time.monotonic()
+            last_stuck_reset = last_score_change = now_after
+            last_score = 0
+            last_frame = -1
             time.sleep(args.interval)
             continue
 

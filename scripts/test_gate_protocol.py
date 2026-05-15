@@ -139,8 +139,14 @@ def main():
               file=sys.stderr)
         return 2
 
-    tmp_sock = tempfile.mktemp(prefix="touhou_gate_test_", suffix=".sock")
-    tmp_log = tempfile.mktemp(prefix="touhou_gate_test_", suffix=".log")
+    # Socket path must NOT pre-exist (socket() creates it); log can.
+    sock_fd, tmp_sock = tempfile.mkstemp(prefix="touhou_gate_test_",
+                                         suffix=".sock")
+    os.close(sock_fd)
+    os.unlink(tmp_sock)
+    log_fd, tmp_log = tempfile.mkstemp(prefix="touhou_gate_test_",
+                                       suffix=".log")
+    os.close(log_fd)
 
     proc = subprocess.Popen(
         [sys.executable, args.mcu,

@@ -52,9 +52,8 @@ TOUHOU_NO_FLASH=
 # for the full GATE_WINDOW even if /tmp/score_hit appears early.
 DEBUG_MODE=
 
-# Optional panel backlight value. Empty = leave the kernel/default brightness
-# alone. The project panel used 120.
-PANEL_BRIGHTNESS=120
+# Optional panel backlight (panel-specific). Empty = leave alone.
+# PANEL_BRIGHTNESS=120
 
 # Alternate hook examples for testing without a gate daemon:
 # HOOK='echo "GATE_EVENT $(date -Iseconds)" >> /tmp/gate_audit.log'

@@ -38,8 +38,9 @@ static int find_th12_cwd(DWORD pid, char *out, DWORD outlen) {
     if (snap == INVALID_HANDLE_VALUE) return 1;
     MODULEENTRY32 me = { .dwSize = sizeof(me) };
     if (!Module32First(snap, &me)) { CloseHandle(snap); return 1; }
-    /* me.szExePath is the th12.exe path; cwd is its directory */
-    strncpy(out, me.szExePath, outlen);
+    /* strncpy doesn't NUL-terminate when src >= outlen. */
+    strncpy(out, me.szExePath, outlen - 1);
+    out[outlen - 1] = '\0';
     for (int i = (int)strlen(out)-1; i >= 0; i--) {
         if (out[i] == '\\' || out[i] == '/') { out[i] = 0; break; }
     }
@@ -50,6 +51,8 @@ static int resolve_dll_path(const char *arg, char *out, DWORD outlen) {
     if (arg) return GetFullPathNameA(arg, outlen, out, NULL) ? 0 : 1;
     char self[MAX_PATH]; DWORD n = GetModuleFileNameA(NULL, self, MAX_PATH);
     if (!n) return 1;
+    if (n >= MAX_PATH) n = MAX_PATH - 1;
+    self[n] = '\0';
     for (int i = (int)n-1; i >= 0; i--) {
         if (self[i] == '\\' || self[i] == '/') { self[i+1] = 0; break; }
     }

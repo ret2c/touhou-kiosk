@@ -53,6 +53,10 @@ apt-get install -y --no-install-recommends \
 echo "[+] copying scripts to ${DEST_DIR}"
 mkdir -p "${DEST_DIR}" "${GAME_DIR}"
 cp -r "${SRC_DIR}/scripts/." "${DEST_DIR}/"
+if [ "${TARGET_HOME}" != "/home/ubuntu" ]; then
+    find "${DEST_DIR}" -type f \( -name "*.sh" -o -name "*.py" \) -print0 |
+        xargs -0 sed -i "s|/home/ubuntu|${TARGET_HOME}|g"
+fi
 chown -R "${TARGET_USER}:${TARGET_USER}" "${DEST_DIR}" "${TARGET_HOME}/games"
 chmod +x "${DEST_DIR}/launch_th12.sh"
 find "${DEST_DIR}" -name "*.py" -exec chmod +x {} \;
@@ -67,25 +71,26 @@ install -o "${TARGET_USER}" -g "${TARGET_USER}" -m 0644 \
     "${SRC_DIR}/scripts/th12_stageswitch/th12_stageswitch_v4.dll" \
     "${GAME_DIR}/th12_stageswitch_v4.dll"
 
-if [ "${TARGET_HOME}" != "/home/ubuntu" ]; then
-    echo "[!] WARNING: scripts have hard-coded /home/ubuntu paths in places"
-    echo "    (systemd units, HOOK strings, /opt/touhou-hangover defaults)."
-    echo "    Edit ${DEST_DIR}/launch_th12.sh and systemd/*.service"
-    echo "    to point at ${TARGET_HOME} before enabling the service."
-fi
-
 echo "[+] installing systemd units"
-cp "${SRC_DIR}/systemd/"*.service /etc/systemd/system/
-if command -v systemctl >/dev/null 2>&1; then
+for unit in "${SRC_DIR}/systemd/"*.service; do
+    base="$(basename "$unit")"
+    sed -e "s|/home/ubuntu|${TARGET_HOME}|g" \
+        -e "s|^User=ubuntu$|User=${TARGET_USER}|g" \
+        -e "s|^Group=ubuntu$|Group=${TARGET_USER}|g" \
+        -e "s|HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu|HOME=${TARGET_HOME} USER=${TARGET_USER} LOGNAME=${TARGET_USER}|g" \
+        "$unit" > "/etc/systemd/system/${base}"
+done
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
 else
-    echo "    [!] systemctl not available — units copied but not registered."
-    echo "    [!] (this is fine in a container; on a real OPi systemd is always present)"
+    echo "    [!] systemd not running — units copied but not registered."
 fi
 
 echo "[+] env file"
 if [ ! -e /etc/default/touhou-kiosk ]; then
-    cp "${SRC_DIR}/etc/touhou-kiosk.default.example" /etc/default/touhou-kiosk
+    sed "s|/home/ubuntu|${TARGET_HOME}|g" \
+        "${SRC_DIR}/etc/touhou-kiosk.default.example" \
+        > /etc/default/touhou-kiosk
     echo "    wrote /etc/default/touhou-kiosk from template"
 else
     echo "    /etc/default/touhou-kiosk already exists — left alone"
@@ -100,7 +105,7 @@ if [ ! -e "${SUDOERS_FILE}" ]; then
 # touhou-kiosk kiosk: passwordless sudo for the operations the launcher needs.
 # The kiosk service runs as ${TARGET_USER} and shells out to root for killall,
 # wineserver -k, xrandr-on-tty1, /proc/<pid>/mem reads, and systemctl restart.
-${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/bin/killall, /usr/bin/wineserver, /usr/bin/xrandr, /usr/bin/xdotool, /usr/bin/systemctl, /usr/bin/python3, /opt/touhou-hangover/usr/bin/wine, /opt/touhou-hangover/usr/bin/wineserver
+${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/bin/killall, /usr/bin/wineserver, /usr/bin/xrandr, /usr/bin/xdotool, /usr/bin/systemctl, /usr/bin/tee, /usr/bin/python3, /opt/touhou-hangover/usr/bin/wine, /opt/touhou-hangover/usr/bin/wineserver
 EOF
     chmod 0440 "${SUDOERS_FILE}"
     visudo -c -f "${SUDOERS_FILE}" >/dev/null

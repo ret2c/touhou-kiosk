@@ -114,7 +114,7 @@ def cmd_heartbeat(args):
         return 0 if resp.startswith("OK") else 1
 
 
-def _arm_window_foreground(args):
+def _run_arm_window(args):
     """Connect, ARM, heartbeat-loop until window expires or hit-file appears,
     DISARM, return."""
     end_time = time.time() + args.seconds
@@ -233,10 +233,10 @@ def cmd_arm_window(args):
             sys.stderr = sys.stdout
         except OSError:
             pass
-        rc = _arm_window_foreground(args)
+        rc = _run_arm_window(args)
         os._exit(rc)
     else:
-        return _arm_window_foreground(args)
+        return _run_arm_window(args)
 
 
 def main():
